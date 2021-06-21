@@ -1,7 +1,14 @@
+# clean~
+clean
+*.swp
+.DS_Store
+*.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-*$py.class
+*z$py.class
+*.egg-info/
 
 # C extensions
 *.so
@@ -127,3 +134,40 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# eclipse related files 
+.project
+.pydevproject
+.settings/
+
+# pycharm files
+.idea/
+
+# data files
+*.nc
+*.zarr
+
+# fig and movies
+*.png
+*.jpg
+*.pdf
+*.mp4
+*figs/
+
+# openoffice
+*.odp#
+
+# jupyter
+#.ipynb*
+
+# logins
+*.login
+
+# dask files
+daskf.pbs
+dask-worker*
+dask-scheduler*
+jlab.pbs.o*
+*.log
+*.nodefile
+
