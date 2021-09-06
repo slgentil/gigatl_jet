@@ -1,0 +1,59 @@
+Script de la section cartesianGrid :
+
+Script permettant de créer une grille cartesian avec les fichiers GIGATL.
+Pour passer de GIGATL6 à GIGATL3 : 
+Changer la liste et le chemin d'acces dans le fichier cartesian_grid.py
+
+Des changements sont à effectuer dans definition/defPrincipal.py :
+
+1) modifier la fonction :
+def addGrille(ds):
+	# On récupère la liste des fichiers à ouvrir via le fichier liste 
+	path = "/home/datawork-lops-megatl/GIGATL6/GIGATL6_1h/HIS/"
+	gridname = path+'GIGATL6_12h_inst_2004-01-15-2004-01-19.nc'
+
+par 
+	path = "/home/datawork-lops-megatl/GIGATL3/"
+	gridname = path+'gigatl3_grid.nc'
+
+2) Il n'y a pas la valeur de Vtransform dans gigatl3_grid.nc, celle-ci vaut 2 ("new"), peut être retrouvé dans les attributs des fichiers netCDF. Peut mener à quelques erreurs.
+
+3) Et remplacer la fonction get_z par celle-ci :
+
+def get_z(run, zeta=None, h=None, vgrid='r', hgrid='r', vtrans=None):
+    ''' compute vertical coordinates
+        zeta should have the size of the final output
+        vertical coordinate is first in output
+    '''
+
+    ds = run
+    N = run.dims['s_rho']
+    hc = run.hc
+    _h = ds.h if h is None else h
+    _zeta = 0*ds.h if zeta is None else zeta
+
+    # swith horizontal grid if needed (should we use grid.interp instead?)
+    if hgrid in ['u','v']:
+        funtr = eval("rho2"+hgrid)
+        if zeta is None:
+            _zeta = funtr(_zeta, ds)
+        _h = funtr(_h, ds)
+    
+    # sc = sc_r ou sc_w suivant le paramètre vgrid
+    sc=ds['sc_'+vgrid]
+    cs=ds['Cs_'+vgrid]
+    vtrans = 2
+    if vtrans == 2:
+        z0 = (hc * sc + cs * _h) / (hc + _h)
+        z = _zeta + (_zeta + _h) * z0
+    else:
+        z0 = hc*sc + (_h-hc)*cs
+        z = z0 + _zeta*(1+z0/_h)
+    print("z0 ",np.nanmax(z0))
+        
+    z = z.squeeze()
+    zdim = "s_"+vgrid.replace('r','rho')
+    if z.dims[0] != zdim:
+        z = z.transpose(*(zdim,)+_zeta.dims)
+    return z.rename('z_'+vgrid)
+

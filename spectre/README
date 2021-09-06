@@ -1,0 +1,7 @@
+Script du dossier spectre
+
+Creation_lambda_mode : Permet de sortir deux fichiers netCDF mode et lambda qui contiennent les valeurs propres pour la relation de dispersion.
+
+Dispersion : Permet de sortir des plots du spectre avec la relation de dispersion dessus.
+
+spectre_verification : Notebook de vérification pour le spectre 
