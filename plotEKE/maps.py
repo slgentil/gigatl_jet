@@ -115,7 +115,7 @@ def map_contourf_atlantic_tropical(latitudes,longitudes,MAT,**kwargs):
     X,Y=m(LON,LAT)
     
     m.contourf(X,Y,MAT,levels=np.arange(options['vmin'],options['vmax'],options['vstep']),cmap=options['cmap'],extend='both')
-    levels_cont=np.linspace(-16, 16, 9)
+    levels_cont=np.linspace(0, 40, 9)
 
     
     cbar=plt.colorbar(ticks=np.arange(options['vmin'],options['vmax'],options['vstep']*2))

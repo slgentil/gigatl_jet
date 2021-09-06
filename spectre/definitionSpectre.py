@@ -11,7 +11,7 @@ import xarray as xr
 
 # dispersion relations dimensionalisée
 B=2.3e-11
-modes2 = xr.open_dataset('lambda.nc')
+modes2 = xr.open_dataset('/home/durand/Documents/GIGATL/relationDispersion/lambda_G3.nc')
 
 def compute_2d_spectrum(F,nx,ny,dx,dy):
     """
@@ -49,6 +49,7 @@ def compute_constant(n):
     the dimension O and K of omega and k such 
     that omega = f(k) -> omega*/O = f(k*/K)
     """
+    modes2 = xr.open_dataset('/home/durand/Documents/GIGATL/relationDispersion/lambda_G3.nc')
     c = 1./(modes2.lamba.values[n])
 #     print('c = ',c)
     
