@@ -16,7 +16,10 @@ from math import radians, cos, sin, asin, sqrt
 def addGrid(ds, gridname):
     gd = xr.open_dataset(gridname, chunks={'s_rho': 1})
     # hc in history file
-    # ds['hc'] = gd.hc
+    try: 
+        ds['hc'] = gd.hc
+    except:
+        ds['hc'] = gd.attrs['hc']
     ds['h'] = gd.h
     # ds['Vtransform'] = gd.Vtransform
     ds['pm']   = gd.pm
@@ -62,11 +65,11 @@ def xgcm_grid(ds):
         ds = ds.set_coords(_coords)
         
         # compute z coordinate at rho/w points
-        if 'ssh' in [v for v in ds.data_vars] and \
+        if 'zeta' in [v for v in ds.data_vars] and \
            's_rho' in [d for d in ds.dims.keys()] and \
             ds['s_rho'].size>1:
-            z_r = get_z(ds, zeta=ds.ssh, xgrid=grid).fillna(0.)
-            z_w = get_z(ds, zeta=ds.ssh, xgrid=grid, vgrid='w').fillna(0.)
+            z_r = get_z(ds, zeta=ds.zeta, xgrid=grid).fillna(0.)
+            z_w = get_z(ds, zeta=ds.zeta, xgrid=grid, vgrid='w').fillna(0.)
             ds['z_r'] = z_r
             ds['z_w'] = z_w
             ds['z_u'] = grid.interp(z_r,'xi')
@@ -529,22 +532,21 @@ def slices(ds, var, z, longitude=None, latitude=None, depth=None):
         slices_values = depth
 
     # Recursively loop over time if needed
-    if len(var.dims) == 4:
+    if len(var.squeeze().dims) == 4:
         vnew = [slices(ds, var.isel(time_counter=t), z.isel(time_counter=t),
                       longitude=longitude, latitude=latitude, depth=depth)
                       for t in range(len(var.time_counter))]
         vnew = xr.concat(vnew, dim='time_counter')
     else:
         vnew = xgrid.transform(var, axe, slices_values,
-                               target_data=var[coord_ref])
-    print(axe,coord_ref,coord_x,coord_y)
+                               target_data=var[coord_ref]).squeeze()
     # Do the linear interpolation
     if not depth:
         x = xgrid.transform(var[coord_x], axe, slices_values,
-                                   target_data=var[coord_ref])\
-                     .expand_dims({dims['s']: len(var[dims['s']])})
+                                   target_data=var[coord_ref]).squeeze() #\
+                     #.expand_dims({dims['s']: len(var[dims['s']])})
         y = xgrid.transform(var[coord_y], axe, slices_values,
-                                   target_data=var[coord_ref])
+                                   target_data=var[coord_ref]).squeeze()
 
         # Add the coordinates to dataArray
         vnew = vnew.assign_coords(coords={coord_x:x})
@@ -594,6 +596,63 @@ def ds_hor_chunk(ds, keep_complete_axe=None, wanted_chunk=100):
         return
     if keep_complete_axe and keep_complete_axe!= 'x' and keep_complete_axe!='y':
         print('keep_complete_axe must equal x or y')
+        return
+    
+    # get horizontal dimensions of the Dataset/DataArray
+    chunks = {}
+    hor_dim_names = {}
+    if isinstance(ds,xr.Dataset):
+        s_dim = max([ds.dims[s] for s in ds.dims.keys() if 's_' in s])
+        for key,value in ds.dims.items():
+            if 'x' in key or 'y' in key:
+                hor_dim_names[key] = value
+    else:
+        s_dim = max([len(ds[s]) for s in ds.dims if 's_' in s])
+        for key in ds.dims:
+            if 'x' in key or 'y' in key:
+                hor_dim_names[key] = len(ds[key])
+                           
+    if keep_complete_axe:
+        # get the maximum length of the dimensions along the argument axe
+        # set the chunks of those dimensions to -1 (no chunk)
+        h_dim=[]
+        for s in hor_dim_names.keys():
+            if keep_complete_axe in s:
+                h_dim.append(hor_dim_names[s])
+                hor_dim_names[s] = -1
+        h_dim = max(h_dim) 
+        # compute the chunk on the dimensions along the other horizontal axe
+        size_chunk = int(np.ceil(wanted_chunk*1.e6 / 4. / s_dim / h_dim))
+    else : 
+        # compute the chunk on all horizontal dimensions
+        size_chunk = int(np.ceil(np.sqrt(wanted_chunk*1.e6 / 4. / s_dim )))
+    
+    # Initialize the dctionnary of chunks
+    for s in hor_dim_names.keys():
+        chunks[s]=min([size_chunk,hor_dim_names[s]])
+        
+    return ds.chunk(chunks)
+
+
+def auto_chunk(ds, keep_complete_axe=None, wanted_chunk=100):
+    """
+    Rechunk Dataset or DataArray such as each partition size is about 100Mb
+    Input:
+        - ds : (Dataset or DataArray) object to rechunk
+        - keep_complete_axe : (character) Horizontal axe to keep with no chunk (x or y)
+        - wanted_chunk : (integer) size of each partition in Mb
+    Output:
+        - object rechunked
+    """
+    
+    #check input parameters
+    if not isinstance(ds, (xr.Dataset,xr.DataArray)):
+        print('argument must be a xarray.DataArray or xarray.Dataset')
+        return
+    if keep_complete_axe and keep_complete_axe != 'x' 
+                         and keep_complete_axe != 'y':
+                         and keep_complete_axe != 'z':
+        print('keep_complete_axe must equal x or y or z')
         return
     
     # get horizontal dimensions of the Dataset/DataArray
