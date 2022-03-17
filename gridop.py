@@ -13,7 +13,7 @@ from collections import OrderedDict
 
 from math import radians, cos, sin, asin, sqrt
 
-def addGrid(ds, gridname):
+def addGrid(ds, gridname, grid_metrics=0):
     gd = xr.open_dataset(gridname, chunks={'s_rho': 1})
     # hc in history file
     try: 
@@ -35,12 +35,12 @@ def addGrid(ds, gridname):
     ds = adjust_grid(ds)
 
     # On crée la grille xgcm
-    ds, grid = xgcm_grid(ds)
+    ds, grid = xgcm_grid(ds, grid_metrics=grid_metrics)
     
     return ds, grid
 
 
-def xgcm_grid(ds):
+def xgcm_grid(ds,grid_metrics=0):
         
         # Create xgcm grid without metrics
         coords={'xi': {'center':'x_rho', 'inner':'x_u'}, 
@@ -48,7 +48,12 @@ def xgcm_grid(ds):
                 's': {'center':'s_rho', 'outer':'s_w'}}
         grid = Grid(ds, 
                   coords=coords,
+                  periodic=False,
                   boundary='extend')
+        
+        if grid_metrics==0:           
+            ds.attrs['xgcm-Grid'] = grid
+            return ds, grid
         
         # compute horizontal coordinates
         #ds['lon_u'] = grid.interp(ds.lon_rho,'xi')
@@ -64,21 +69,7 @@ def xgcm_grid(ds):
                   ]
         ds = ds.set_coords(_coords)
         
-        # compute z coordinate at rho/w points
-        if 'zeta' in [v for v in ds.data_vars] and \
-           's_rho' in [d for d in ds.dims.keys()] and \
-            ds['s_rho'].size>1:
-            z_r = get_z(ds, zeta=ds.zeta, xgrid=grid).fillna(0.)
-            z_w = get_z(ds, zeta=ds.zeta, xgrid=grid, vgrid='w').fillna(0.)
-            ds['z_r'] = z_r
-            ds['z_w'] = z_w
-            ds['z_u'] = grid.interp(z_r,'xi')
-            ds['z_v'] = grid.interp(z_r,'eta')
-            ds['z_psi'] = grid.interp(ds.z_u,'eta')
-            # set as coordinates in the dataset
-            _coords = ['z_r','z_w','z_u','z_v','z_psi']
-            ds = ds.set_coords(_coords)
-
+        
         # add horizontal metrics for u, v and psi point
         if 'pm' in ds and 'pn' in ds:
             ds['dx_r'] = 1/ds['pm']
@@ -97,14 +88,6 @@ def xgcm_grid(ds):
         dlat = grid.interp(grid.diff(ds.lat_psi,'eta'),'eta')
         ds['dx_psi'], ds['dy_psi'] = dll_dist(dlon, dlat, ds.lon_psi, ds.lat_psi)
 
-        # add vertical metrics for u, v, rho and psi points
-        if 'z_r' in [v for v in ds.coords]:
-            ds['dz_r'] = grid.diff(ds.z_r,'s')
-            ds['dz_w'] = grid.diff(ds.z_w,'s')
-            ds['dz_u'] = grid.diff(ds.z_u,'s')
-            ds['dz_v'] = grid.diff(ds.z_v,'s')
-            ds['dz_psi'] = grid.diff(ds.z_psi,'s')
-
         # add areas metrics for rho,u,v and psi points
         ds['rAr'] = ds.dx_psi * ds.dy_psi
         ds['rAu'] = ds.dx_v * ds.dy_v
@@ -115,13 +98,48 @@ def xgcm_grid(ds):
         # create new xgcmgrid with vertical metrics
         coords={'xi': {'center':'x_rho', 'inner':'x_u'}, 
                 'eta': {'center':'y_rho', 'inner':'y_v'}}
-        if 'z_r' in ds:
-            coords.update({'s': {'center':'s_rho', 'outer':'s_w'}})
+        
         metrics = {
                ('xi',): ['dx_r', 'dx_u', 'dx_v', 'dx_psi'], # X distances
                ('eta',): ['dy_r', 'dy_u', 'dy_v', 'dy_psi'], # Y distances
                ('xi', 'eta'): ['rAr', 'rAu', 'rAv', 'rAf'] # Areas
               }
+        
+        if grid_metrics==1:
+            # generate xgcm grid
+            grid = Grid(ds,
+                        coords=coords,
+                        periodic=False,
+                        metrics=metrics,
+                        boundary='extend')
+            ds.attrs['xgcm-Grid'] = grid
+            return ds, grid
+        
+        # compute z coordinate at rho/w points
+        if 'zeta' in [v for v in ds.data_vars] and \
+           's_rho' in [d for d in ds.dims.keys()] and \
+            ds['s_rho'].size>1:
+            z_r = get_z(ds, zeta=ds.zeta, xgrid=grid).fillna(0.)
+            z_w = get_z(ds, zeta=ds.zeta, xgrid=grid, vgrid='w').fillna(0.)
+            ds['z_r'] = z_r
+            ds['z_w'] = z_w
+            ds['z_u'] = grid.interp(z_r,'xi')
+            ds['z_v'] = grid.interp(z_r,'eta')
+            ds['z_psi'] = grid.interp(ds.z_u,'eta')
+            # set as coordinates in the dataset
+            _coords = ['z_r','z_w','z_u','z_v','z_psi']
+            ds = ds.set_coords(_coords)
+
+        # add vertical metrics for u, v, rho and psi points
+        if 'z_r' in [v for v in ds.coords]:
+            ds['dz_r'] = grid.diff(ds.z_r,'s')
+            ds['dz_w'] = grid.diff(ds.z_w,'s')
+            ds['dz_u'] = grid.diff(ds.z_u,'s')
+            ds['dz_v'] = grid.diff(ds.z_v,'s')
+            ds['dz_psi'] = grid.diff(ds.z_psi,'s')
+            
+        if 'z_r' in ds:
+            coords.update({'s': {'center':'s_rho', 'outer':'s_w'}})
         if 'z_r' in ds:
             metrics.update({('s',): ['dz_r', 'dz_u', 'dz_v', 'dz_psi', 'dz_w']}), # Z distances
         
@@ -396,7 +414,7 @@ def get_z(ds, zeta=None, h=None, xgrid=None, vgrid='r',
 
 
 
-def rotuv(ds, hgrid='r'):
+def rotuv(ds, u=None, v=None, angle=None):
     '''
     Rotate winds or u,v to lat,lon coord -> result on rho grid by default
     '''
@@ -404,27 +422,37 @@ def rotuv(ds, hgrid='r'):
     import timeit
     
     xgrid = ds.attrs['xgcm-Grid']
+        
+    if u is None:
+        u = ds.u 
+        u = x2x(ds, u, xgrid, 'r')
+        #u = ds_hor_chunk(u, wanted_chunk=100)
+        
+    if v is None:
+        v = ds.v
+        v = x2x(ds, v, xgrid, 'r')
+        #v = ds_hor_chunk(v, wanted_chunk=100)
+        
+    angle = ds.angle if angle is None else angle
     
-    startime = timeit.default_timer()
-    angle = ds.angle.persist()
-    
-    u = x2x(ds, ds.u, xgrid, 'r')
-    v = x2x(ds, ds.v, xgrid, 'r')
+    cosang = np.cos(angle)
+    sinang = np.sin(angle)
 
-    startim = timeit.default_timer()
-    cosang = np.cos(angle).persist()
-    sinang = np.sin(angle).persist()
-    urot = u*cosang - v*sinang
-    vrot = u*sinang + v*cosang
+    # All the program statements
+    urot = (u*cosang - v*sinang)
+    #urot = da.multiply(u, cosang) - da.multiply(v, sinang)
+    
+    #start = timeit.default_timer()
+    vrot = (u*sinang + v*cosang)
+    #vrot = da.multiply(u, sinang) + da.multiply(v, cosang)
+    #stop = timeit.default_timer()
+    #print("time vrot: "+str(stop - start))
+    
     urot = urot.assign_coords(coords={'z_r':u.z_r})
     vrot = vrot.assign_coords(coords={'z_r':v.z_r}) 
-    
-    
-    if hgrid in ['u','v']:
-        urot = x2x(ds, urot, xgrid, hgrid)
-        vrot = x2x(ds, vrot, xgrid, hgrid)
 
     return [urot,vrot]
+
 
 def find_nearest_above(my_array, target, axis=0):
     diff = target - my_array
@@ -467,7 +495,21 @@ def find_nearest(array, value):
 
     return idx
     
-    
+def get_grid_point(var):
+    dims = var.dims
+    if "x_u" in dims:
+        if "y_rho" in dims:
+            return 'u'
+        else:
+            return 'psi'
+    elif "y_v" in dims:
+        return 'v'
+    else:
+        if 's_rho' in dims:
+            return 'rho'
+        else:
+            return 'w'
+        
 def slices(ds, var, z, longitude=None, latitude=None, depth=None):
     """
     #
@@ -511,18 +553,21 @@ def slices(ds, var, z, longitude=None, latitude=None, depth=None):
      # Find dimensions and coordinates of the variable
     dims = get_spatial_dims(var)
     coords = get_spatial_coords(var)
+    hgrid = get_grid_point(var)
 
     if longitude is not None:
         axe = 'xi'
         coord_ref = coords['x'] if coords['x'] else coords['lon']
         coord_x = coords['y'] if coords['y'] else coords['lat']
-        coord_y = coords['z']
+        if dims['s'] is not None:
+            coord_y = coords['z'] if coords['z'] is not None else 'z_'+hgrid[0]
         slices_values = longitude
     elif latitude is not None:
         axe = 'eta'
         coord_ref = coords['y'] if coords['y'] else coords['lat']
         coord_x = coords['x'] if coords['x'] else coords['lon']
-        coord_y = coords['z']
+        if dims['s'] is not None:
+            coord_y = coords['z'] if coords['z'] is not None else 'z_'+hgrid[0]
         slices_values = latitude
     else:
         axe = 's'
@@ -544,19 +589,21 @@ def slices(ds, var, z, longitude=None, latitude=None, depth=None):
     if not depth:
         x = xgrid.transform(var[coord_x], axe, slices_values,
                                    target_data=var[coord_ref]).squeeze() #\
-                     #.expand_dims({dims['s']: len(var[dims['s']])})
-        y = xgrid.transform(var[coord_y], axe, slices_values,
-                                   target_data=var[coord_ref]).squeeze()
-
-        # Add the coordinates to dataArray
+                     #.expand_dims({dims['s']: len(var[dims['s']])})            
         vnew = vnew.assign_coords(coords={coord_x:x})
-        vnew = vnew.assign_coords(coords={coord_y:y})
+
+        #y = xgrid.transform(var[coord_y], axe, slices_values,
+        if dims['s'] is not None:
+            y = xgrid.transform(z, axe, slices_values,
+                                       target_data=var[coord_ref]).squeeze()
+            # Add the coordinates to dataArray
+            vnew = vnew.assign_coords(coords={coord_y:y})
     else:
         # Add the coordinates to dataArray
         vnew = vnew.assign_coords(coords={coord_x:var[coord_x]})
         vnew = vnew.assign_coords(coords={coord_y:var[coord_y]})
 
-    return vnew.squeeze().unify_chunks()
+    return vnew.squeeze().fillna(0.)  #unify_chunks()
 
 
 
@@ -634,58 +681,3 @@ def ds_hor_chunk(ds, keep_complete_axe=None, wanted_chunk=100):
     return ds.chunk(chunks)
 
 
-def auto_chunk(ds, keep_complete_axe=None, wanted_chunk=100):
-    """
-    Rechunk Dataset or DataArray such as each partition size is about 100Mb
-    Input:
-        - ds : (Dataset or DataArray) object to rechunk
-        - keep_complete_axe : (character) Horizontal axe to keep with no chunk (x or y)
-        - wanted_chunk : (integer) size of each partition in Mb
-    Output:
-        - object rechunked
-    """
-    
-    #check input parameters
-    if not isinstance(ds, (xr.Dataset,xr.DataArray)):
-        print('argument must be a xarray.DataArray or xarray.Dataset')
-        return
-    if keep_complete_axe and keep_complete_axe != 'x' 
-                         and keep_complete_axe != 'y':
-                         and keep_complete_axe != 'z':
-        print('keep_complete_axe must equal x or y or z')
-        return
-    
-    # get horizontal dimensions of the Dataset/DataArray
-    chunks = {}
-    hor_dim_names = {}
-    if isinstance(ds,xr.Dataset):
-        s_dim = max([ds.dims[s] for s in ds.dims.keys() if 's_' in s])
-        for key,value in ds.dims.items():
-            if 'x' in key or 'y' in key:
-                hor_dim_names[key] = value
-    else:
-        s_dim = max([len(ds[s]) for s in ds.dims if 's_' in s])
-        for key in ds.dims:
-            if 'x' in key or 'y' in key:
-                hor_dim_names[key] = len(ds[key])
-                           
-    if keep_complete_axe:
-        # get the maximum length of the dimensions along the argument axe
-        # set the chunks of those dimensions to -1 (no chunk)
-        h_dim=[]
-        for s in hor_dim_names.keys():
-            if keep_complete_axe in s:
-                h_dim.append(hor_dim_names[s])
-                hor_dim_names[s] = -1
-        h_dim = max(h_dim) 
-        # compute the chunk on the dimensions along the other horizontal axe
-        size_chunk = int(np.ceil(wanted_chunk*1.e6 / 4. / s_dim / h_dim))
-    else : 
-        # compute the chunk on all horizontal dimensions
-        size_chunk = int(np.ceil(np.sqrt(wanted_chunk*1.e6 / 4. / s_dim )))
-    
-    # Initialize the dctionnary of chunks
-    for s in hor_dim_names.keys():
-        chunks[s]=min([size_chunk,hor_dim_names[s]])
-        
-    return ds.chunk(chunks)
