@@ -28,6 +28,8 @@ def addGrid(ds, gridname, grid_metrics=0):
     ds['sc_w'] = gd.sc_w
     ds['Cs_r'] = gd.Cs_r
     ds['Cs_w'] = gd.Cs_w
+    ds['lon_rho'] = gd.lon_rho
+    ds['lat_rho'] = gd.lat_rho
     ds['angle'] = gd.angle
     ds['mask_rho'] = gd.mask_rho
 
@@ -56,10 +58,10 @@ def xgcm_grid(ds,grid_metrics=0):
             return ds, grid
         
         # compute horizontal coordinates
-        #ds['lon_u'] = grid.interp(ds.lon_rho,'xi')
-        #ds['lat_u'] = grid.interp(ds.lat_rho,'xi')
-        #ds['lon_v'] = grid.interp(ds.lon_rho,'eta')
-        #ds['lat_v'] = grid.interp(ds.lat_rho,'eta')
+        ds['lon_u'] = grid.interp(ds.lon_rho,'xi')
+        ds['lat_u'] = grid.interp(ds.lat_rho,'xi')
+        ds['lon_v'] = grid.interp(ds.lon_rho,'eta')
+        ds['lat_v'] = grid.interp(ds.lat_rho,'eta')
         ds['lon_psi'] = grid.interp(ds.lon_v,'xi')
         ds['lat_psi'] = grid.interp(ds.lat_u,'eta')
         # set as coordinates in the dataset
@@ -186,13 +188,17 @@ def adjust_grid(ds):
         ds = ds.rename({d: d[0]+'_rho'})
         
     # change nav variables to coordinates        
-    _coords = [d for d in [d for d in ds.data_vars.keys()] if "nav_" in d]
+    #_coords = [d for d in [d for d in ds.data_vars.keys()] if "nav_" in d]
+    #ds = ds.set_coords(_coords) 
+    _coords = [d for d in ds.data_vars.keys() if "lat_" in d]
+    ds = ds.set_coords(_coords) 
+    _coords = [d for d in ds.data_vars.keys() if "lon_" in d]
     ds = ds.set_coords(_coords) 
     
     # rename nav_lat/lon coordinates to lat/lon   
-    _coords = [c for c in ds.coords.keys() if "nav_" in c]   
-    for c in _coords:
-        ds = ds.rename({c: c.replace('nav_','')})
+    #_coords = [c for c in ds.coords.keys() if "nav_" in c]   
+    #for c in _coords:
+    #    ds = ds.rename({c: c.replace('nav_','')})
     
     return ds
     
@@ -447,9 +453,11 @@ def rotuv(ds, u=None, v=None, angle=None):
     #vrot = da.multiply(u, sinang) + da.multiply(v, cosang)
     #stop = timeit.default_timer()
     #print("time vrot: "+str(stop - start))
-    
-    urot = urot.assign_coords(coords={'z_r':u.z_r})
-    vrot = vrot.assign_coords(coords={'z_r':v.z_r}) 
+     
+    coords = get_spatial_coords(u)
+    if coords['z'] is not None: urot = urot.assign_coords(coords={'z_r':u[coords['z']]})
+    coords = get_spatial_coords(v)
+    if coords['z'] is not None: vrot = vrot.assign_coords(coords={'z_r':v[coords['z']]}) 
 
     return [urot,vrot]
 
