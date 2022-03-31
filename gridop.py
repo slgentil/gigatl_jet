@@ -9,102 +9,139 @@ import dask.array as da
 import pyinterp
 
 import time
+import itertools
 from collections import OrderedDict
 
 from math import radians, cos, sin, asin, sqrt
 
-def addGrid(ds, gridname, grid_metrics=0):
-    gd = xr.open_dataset(gridname, chunks={'s_rho': 1})
+def open_files(model, gridname, filenames, 
+               grid_metrics=0,
+               drop_variables=[], chunks={'t':1},
+              ):
+                  
+    # convert filenames to list of strings if string
+    filenames = filenames.tolist() if isinstance(filenames,str) else filenames
+    # find time dimension name
+    concat_dim = [k for k,v in model.rename_vars.items() if v == 't'][0]
+    open_kwargs = {'concat_dim': concat_dim,
+                   'combine': 'nested',
+                   'coords': 'minimal',
+                   'parallel': False,
+                   'compat': 'override'
+                  }
+    try : 
+        ds = xr.open_zarr(filenames[0], drop_variables=drop_variables)
+    except:
+        try : 
+            ds = xr.open_mfdataset(filenames, drop_variables=drop_variables, **open_kwargs)  
+        except :
+            print('open_files: unknown format: only Netcdf or Zarr')
+            return
+        
+    model.ds = adjust_grid(model, ds)
+    
+    ds, grid = add_grid(model, gridname, grid_metrics=grid_metrics)
+    model.ds = ds.chunk(chunks=chunks)
+    return model.ds, grid
+
+def add_grid(model, gridname, grid_metrics=0):
+    # open grid file
+    try : 
+        gd = xr.open_zarr(gridname).squeeze()
+    except:
+        try : 
+            gd = xr.open_dataset(gridname).squeeze() 
+        except :
+            print('add_grid: unknown format for grid : only Netcdf or Zarr')
+            
+    # Rename variable according model
+    gd = adjust_grid(model, gd)
+    
     # hc in history file
     try: 
-        ds['hc'] = gd.hc
+        model.ds['hc'] = gd.hc
     except:
-        ds['hc'] = gd.attrs['hc']
-    ds['h'] = gd.h
+        model.ds['hc'] = gd.attrs['hc']
+    model.ds['h'] = gd.h
     # ds['Vtransform'] = gd.Vtransform
-    ds['pm']   = gd.pm
-    ds['pn']   = gd.pn
-    ds['sc_r'] = gd.sc_r
-    ds['sc_w'] = gd.sc_w
-    ds['Cs_r'] = gd.Cs_r
-    ds['Cs_w'] = gd.Cs_w
-    ds['lon_rho'] = gd.lon_rho
-    ds['lat_rho'] = gd.lat_rho
-    ds['angle'] = gd.angle
-    ds['mask_rho'] = gd.mask_rho
-
-    # On modifie des dimensions et des coordonnées, on crée la grille xgc
-    ds = adjust_grid(ds)
+    model.ds['pm']   = gd.pm
+    model.ds['pn']   = gd.pn
+    model.ds['sc_r'] = gd.sc_r
+    model.ds['sc_w'] = gd.sc_w
+    model.ds['Cs_r'] = gd.Cs_r
+    model.ds['Cs_w'] = gd.Cs_w
+    model.ds['angle'] = gd.angle
+    model.ds['mask'] = gd.mask
+    model.ds['lon'] = gd.lon
+    model.ds['lat'] = gd.lat
 
     # On crée la grille xgcm
-    ds, grid = xgcm_grid(ds, grid_metrics=grid_metrics)
+    ds, grid = xgcm_grid(model, grid_metrics=grid_metrics)
     
     return ds, grid
 
-
-def xgcm_grid(ds,grid_metrics=0):
+def xgcm_grid(model,grid_metrics=0):
         
         # Create xgcm grid without metrics
-        coords={'xi': {'center':'x_rho', 'inner':'x_u'}, 
-                'eta': {'center':'y_rho', 'inner':'y_v'}, 
-                's': {'center':'s_rho', 'outer':'s_w'}}
-        grid = Grid(ds, 
+        coords={'x': {'center':'x', 'inner':'x_u'}, 
+                'y': {'center':'y', 'inner':'y_v'}, 
+                'z': {'center':'s', 'outer':'s_w'}}
+        grid = Grid(model.ds, 
                   coords=coords,
                   periodic=False,
                   boundary='extend')
         
         if grid_metrics==0:           
-            ds.attrs['xgcm-Grid'] = grid
-            return ds, grid
+            model.xgrid = grid
+            return model.ds, grid
         
         # compute horizontal coordinates
-        ds['lon_u'] = grid.interp(ds.lon_rho,'xi')
-        ds['lat_u'] = grid.interp(ds.lat_rho,'xi')
-        ds['lon_v'] = grid.interp(ds.lon_rho,'eta')
-        ds['lat_v'] = grid.interp(ds.lat_rho,'eta')
-        ds['lon_psi'] = grid.interp(ds.lon_v,'xi')
-        ds['lat_psi'] = grid.interp(ds.lat_u,'eta')
-        # set as coordinates in the dataset
-        _coords = ['lon_u','lat_u',
-                   'lon_v','lat_v',
-                   'lon_psi','lat_psi',
-                  ]
+
+        ds = model.ds
+        if 'lon_u' not in ds: ds['lon_u'] = grid.interp(ds.lon,'x')
+        if 'lat_u' not in ds: ds['lat_u'] = grid.interp(ds.lat,'x')
+        if 'lon_v' not in ds: ds['lon_v'] = grid.interp(ds.lon,'y')
+        if 'lat_v' not in ds: ds['lat_v'] = grid.interp(ds.lat,'y')
+        if 'lon_f' not in ds: ds['lon_f'] = grid.interp(ds.lon_v,'x')
+        if 'lat_f' not in ds: ds['lat_f'] = grid.interp(ds.lat_u,'y')
+        _coords = [d for d in ds.data_vars.keys() if d.startswith(tuple(['lon','lat']))]
         ds = ds.set_coords(_coords)
         
         
         # add horizontal metrics for u, v and psi point
         if 'pm' in ds and 'pn' in ds:
-            ds['dx_r'] = 1/ds['pm']
-            ds['dy_r'] = 1/ds['pn']
+            ds['dx'] = 1/ds['pm']
+            ds['dy'] = 1/ds['pn']
         else: # backward compatibility, hack
-            dlon = grid.interp(grid.diff(ds.lon_rho,'xi'),'xi')
-            dlat =  grid.interp(grid.diff(ds.lat_rho,'eta'),'eta')
-            ds['dx_r'], ds['dy_r'] = dll_dist(dlon, dlat, ds.lon_rho, ds.lat_rho)
-        dlon = grid.interp(grid.diff(ds.lon_u,'xi'),'xi')
-        dlat = grid.interp(grid.diff(ds.lat_u,'eta'),'eta')
+            dlon = grid.interp(grid.diff(ds.lon,'x'),'x')
+            dlat =  grid.interp(grid.diff(ds.lat,'y'),'y')
+            ds['dx'], ds['dy'] = dll_dist(dlon, dlat, ds.lon, ds.lat)
+        dlon = grid.interp(grid.diff(ds.lon_u,'x'),'x')
+        dlat = grid.interp(grid.diff(ds.lat_u,'y'),'y')
         ds['dx_u'], ds['dy_u'] = dll_dist(dlon, dlat, ds.lon_u, ds.lat_u)
-        dlon = grid.interp(grid.diff(ds.lon_v,'xi'),'xi')
-        dlat = grid.interp(grid.diff(ds.lat_v,'eta'),'eta')
+        dlon = grid.interp(grid.diff(ds.lon_v,'x'),'x')
+        dlat = grid.interp(grid.diff(ds.lat_v,'y'),'y')
         ds['dx_v'], ds['dy_v'] = dll_dist(dlon, dlat, ds.lon_v, ds.lat_v)
-        dlon = grid.interp(grid.diff(ds.lon_psi,'xi'),'xi')
-        dlat = grid.interp(grid.diff(ds.lat_psi,'eta'),'eta')
-        ds['dx_psi'], ds['dy_psi'] = dll_dist(dlon, dlat, ds.lon_psi, ds.lat_psi)
+        dlon = grid.interp(grid.diff(ds.lon_f,'x'),'x')
+        dlat = grid.interp(grid.diff(ds.lat_f,'y'),'y')
+        ds['dx_psi'], ds['dy_psi'] = dll_dist(dlon, dlat, ds.lon_f, ds.lat_f)
 
         # add areas metrics for rho,u,v and psi points
         ds['rAr'] = ds.dx_psi * ds.dy_psi
         ds['rAu'] = ds.dx_v * ds.dy_v
         ds['rAv'] = ds.dx_u * ds.dy_u
-        ds['rAf'] = ds.dx_r * ds.dy_r
+        ds['rAf'] = ds.dx * ds.dy
 
         
         # create new xgcmgrid with vertical metrics
-        coords={'xi': {'center':'x_rho', 'inner':'x_u'}, 
-                'eta': {'center':'y_rho', 'inner':'y_v'}}
+#         coords={'x': {'center':'x', 'inner':'x_u'}, 
+#                 'y': {'center':'y', 'inner':'y_v'}, 
+#                 'z': {'center':'s', 'outer':'s_w'}}
         
         metrics = {
-               ('xi',): ['dx_r', 'dx_u', 'dx_v', 'dx_psi'], # X distances
-               ('eta',): ['dy_r', 'dy_u', 'dy_v', 'dy_psi'], # Y distances
-               ('xi', 'eta'): ['rAr', 'rAu', 'rAv', 'rAf'] # Areas
+               ('x',): ['dx', 'dx_u', 'dx_v', 'dx_psi'], # X distances
+               ('y',): ['dy', 'dy_u', 'dy_v', 'dy_psi'], # Y distances
+               ('x', 'y'): ['rAr', 'rAu', 'rAv', 'rAf'] # Areas
               }
         
         if grid_metrics==1:
@@ -114,36 +151,37 @@ def xgcm_grid(ds,grid_metrics=0):
                         periodic=False,
                         metrics=metrics,
                         boundary='extend')
-            ds.attrs['xgcm-Grid'] = grid
+            model.xgrid = grid
+            model.ds = ds
             return ds, grid
         
         # compute z coordinate at rho/w points
-        if 'zeta' in [v for v in ds.data_vars] and \
-           's_rho' in [d for d in ds.dims.keys()] and \
-            ds['s_rho'].size>1:
-            z_r = get_z(ds, zeta=ds.zeta, xgrid=grid).fillna(0.)
-            z_w = get_z(ds, zeta=ds.zeta, xgrid=grid, vgrid='w').fillna(0.)
-            ds['z_r'] = z_r
+        if 'z_sfc' in [v for v in ds.data_vars] and \
+           's' in [d for d in ds.dims.keys()] and \
+            ds['s'].size>1:
+            z = get_z(model, z_sfc=ds.z_sfc, xgrid=grid).fillna(0.)
+            z_w = get_z(model, z_sfc=ds.z_sfc, xgrid=grid, vgrid='w').fillna(0.)
+            ds['z'] = z
             ds['z_w'] = z_w
-            ds['z_u'] = grid.interp(z_r,'xi')
-            ds['z_v'] = grid.interp(z_r,'eta')
-            ds['z_psi'] = grid.interp(ds.z_u,'eta')
+            ds['z_u'] = grid.interp(z,'x')
+            ds['z_v'] = grid.interp(z,'y')
+            ds['z_f'] = grid.interp(ds.z_u,'y')
             # set as coordinates in the dataset
-            _coords = ['z_r','z_w','z_u','z_v','z_psi']
+            _coords = ['z','z_w','z_u','z_v','z_f']
             ds = ds.set_coords(_coords)
 
         # add vertical metrics for u, v, rho and psi points
-        if 'z_r' in [v for v in ds.coords]:
-            ds['dz_r'] = grid.diff(ds.z_r,'s')
-            ds['dz_w'] = grid.diff(ds.z_w,'s')
-            ds['dz_u'] = grid.diff(ds.z_u,'s')
-            ds['dz_v'] = grid.diff(ds.z_v,'s')
-            ds['dz_psi'] = grid.diff(ds.z_psi,'s')
+        if 'z' in [v for v in ds.coords]:
+            ds['dz'] = grid.diff(ds.z,'z')
+            ds['dz_w'] = grid.diff(ds.z_w,'z')
+            ds['dz_u'] = grid.diff(ds.z_u,'z')
+            ds['dz_v'] = grid.diff(ds.z_v,'z')
+            ds['dz_f'] = grid.diff(ds.z_f,'z')
             
-        if 'z_r' in ds:
-            coords.update({'s': {'center':'s_rho', 'outer':'s_w'}})
-        if 'z_r' in ds:
-            metrics.update({('s',): ['dz_r', 'dz_u', 'dz_v', 'dz_psi', 'dz_w']}), # Z distances
+        # add coords and metrics for xgcm for the vertical direction
+        if 'z' in ds:
+#             coords.update({'z': {'center':'s', 'outer':'s_w'}})
+            metrics.update({('z',): ['dz', 'dz_u', 'dz_v', 'dz_f', 'dz_w']}), # Z distances
         
         # generate xgcm grid
         grid = Grid(ds,
@@ -152,7 +190,8 @@ def xgcm_grid(ds,grid_metrics=0):
                     metrics=metrics,
                     boundary='extend')
 
-        ds.attrs['xgcm-Grid'] = grid
+        model.xgrid = grid
+        model.ds = ds
 
         return ds, grid
 
@@ -177,39 +216,14 @@ def dll_dist(dlon, dlat, lon, lat):
 
 
 
-def adjust_grid(ds):
-    # relevant to regular/analytical grid for now
-    #
-    #ds = ds.reset_coords([c for c in ds.coords if 'nav' in c])
+def adjust_grid(model, ds):
     
-    # rename redundant dimensions
-    _dims = (d for d in ['x', 'y','x_v', 'y_u', 'x_w', 'y_w'] if d in ds.dims)
-    for d in _dims:
-        ds = ds.rename({d: d[0]+'_rho'})
-        
-    # change nav variables to coordinates        
-    #_coords = [d for d in [d for d in ds.data_vars.keys()] if "nav_" in d]
-    #ds = ds.set_coords(_coords) 
-    _coords = [d for d in ds.data_vars.keys() if "lat_" in d]
-    ds = ds.set_coords(_coords) 
-    _coords = [d for d in ds.data_vars.keys() if "lon_" in d]
-    ds = ds.set_coords(_coords) 
-    
-    # rename nav_lat/lon coordinates to lat/lon   
-    #_coords = [c for c in ds.coords.keys() if "nav_" in c]   
-    #for c in _coords:
-    #    ds = ds.rename({c: c.replace('nav_','')})
-    
+    for k,v in model.rename_vars.items():
+        if (k in ds and v not in ds) or \
+            k in ds.dims.keys():
+            ds = ds.rename({k: v})
     return ds
     
-
-
-# Ajout des coordonnées au DataArray
-def add_coords(ds, var, coords):
-    for co in coords:
-        var.coords[co] = ds.coords[co]
-
-
 
 def get_spatial_dims(v):
     """ Return an ordered dict of spatial dimensions in the s/z, y, x order
@@ -218,12 +232,16 @@ def get_spatial_dims(v):
                         for d in ['s','y','x'] )
     return dims
 
+
 def get_spatial_coords(v):
     """ Return an ordered dict of spatial dimensions in the s/z, y, x order
     """
     coords = OrderedDict( (d, next((x for x in v.coords if x.startswith(d)), None))
-                       for d in ['z','lat','y','lon','x'] )
+                       for d in ['z','lat','lon'] )
+    for k,c in coords.items():
+        if c is not None and v.coords[c].size==1: coords[k]= None
     return coords
+
 
 
 
@@ -233,20 +251,26 @@ def x2rho(ds,v, grid):
     dims = get_spatial_dims(v)
     coords = get_spatial_coords(v)
     vout = v.copy()
+    if coords['lon']: lonout = v[coords['lon']].copy()
+    if coords['lat']: latout = v[coords['lat']].copy()
     if coords['z']: zout = v[coords['z']].copy()
     if dims['x'] == 'x_u':
-        vout = grid.interp(vout, 'xi')
-        if coords['z']: zout = grid.interp(zout, 'xi')
+        vout = grid.interp(vout, 'x')
+        if coords['lon']: lonout = grid.interp(lonout, 'x')
+        if coords['lat']: latout = grid.interp(latout, 'x')
+        if coords['z']: zout = grid.interp(zout, 'x')
     if dims['y'] == 'y_v':
-        vout = grid.interp(vout, 'eta')
-        if coords['z']: zout = grid.interp(zout, 'eta')
+        vout = grid.interp(vout, 'y')
+        if coords['lon']: lonout = grid.interp(lonout, 'y')
+        if coords['lat']: latout = grid.interp(latout, 'y')
+        if coords['z']: zout = grid.interp(zout, 'y')
     if dims['s'] == 's_w':
-        vout = grid.interp(vout, 's')
-        if coords['z']: zout = grid.interp(zout, 's')
+        vout = grid.interp(vout, 'z')
+        if coords['z']: zout = grid.interp(zout, 'z')
     # assign coordinates
-    vout = vout.assign_coords(coords={'lon_rho':ds.lon_rho})
-    vout = vout.assign_coords(coords={'lat_rho':ds.lat_rho})
-    if coords['z']:vout = vout.assign_coords(coords={'z_r':zout})
+    if coords['lon']: vout = vout.assign_coords(coords={'lon':lonout})
+    if coords['lat']: vout = vout.assign_coords(coords={'lat':latout})
+    if coords['z']: vout = vout.assign_coords(coords={'z':zout})
 
     return vout
 
@@ -256,19 +280,25 @@ def x2u(ds,v, grid):
     dims = get_spatial_dims(v)
     coords = get_spatial_coords(v)
     vout = v.copy()
+    if coords['lon']: lonout = v[coords['lon']].copy()
+    if coords['lat']: latout = v[coords['lat']].copy()
     if coords['z']: zout = v[coords['z']].copy()
-    if dims['x'] == 'x_rho':
-        vout = grid.interp(vout, 'xi')
-        if coords['z']: zout = grid.interp(zout, 'xi')
+    if dims['x'] == 'x':
+        vout = grid.interp(vout, 'x')
+        if coords['lon']: lonout = grid.interp(lonout, 'x')
+        if coords['lat']: latout = grid.interp(latout, 'x')
+        if coords['z']: zout = grid.interp(zout, 'x')
     if dims['y'] == 'y_v':
-        vout = grid.interp(vout, 'eta')
-        if coords['z']: zout = grid.interp(zout, 'eta')
+        vout = grid.interp(vout, 'y')
+        if coords['lon']: lonout = grid.interp(lonout, 'y')
+        if coords['lat']: latout = grid.interp(latout, 'y')
+        if coords['z']: zout = grid.interp(zout, 'y')
     if dims['s'] == 's_w':
-        vout = grid.interp(vout, 's')
-        if coords['z']: zout = grid.interp(zout, 's')
+        vout = grid.interp(vout, 'z')
+        if coords['z']: zout = grid.interp(zout, 'z')
     # assign coordinates
-    vout = vout.assign_coords(coords={'lon_u':ds.lon_u})
-    vout = vout.assign_coords(coords={'lat_u':ds.lat_u})
+    if coords['lon']: vout = vout.assign_coords(coords={'lon_u':lonout})
+    if coords['lat']: vout = vout.assign_coords(coords={'lat_u':latout})
     if coords['z']:vout = vout.assign_coords(coords={'z_u':zout})
     return vout
 
@@ -278,19 +308,25 @@ def x2v(ds,v, grid):
     dims = get_spatial_dims(v)
     coords = get_spatial_coords(v)
     vout = v.copy()
+    if coords['lon']: lonout = v[coords['lon']].copy()
+    if coords['lat']: latout = v[coords['lat']].copy()
     if coords['z']: zout = v[coords['z']].copy()
     if dims['x'] == 'x_u':
-        vout = grid.interp(vout, 'xi')
-        if coords['z']: zout = grid.interp(zout, 'xi')
-    if dims['y'] == 'y_rho':
-        vout = grid.interp(vout, 'eta')
-        if coords['z']: zout = grid.interp(zout, 'eta')
+        vout = grid.interp(vout, 'x')
+        if coords['lon']: lonout = grid.interp(lonout, 'x')
+        if coords['lat']: latout = grid.interp(latout, 'x')
+        if coords['z']: zout = grid.interp(zout, 'x')
+    if dims['y'] == 'y':
+        vout = grid.interp(vout, 'y')
+        if coords['lon']: lonout = grid.interp(lonout, 'y')
+        if coords['lat']: latout = grid.interp(latout, 'y')
+        if coords['z']: zout = grid.interp(zout, 'y')
     if dims['s'] == 's_w':
-        vout = grid.interp(vout, 's')
-        if coords['z']: zout = grid.interp(zout, 's')
+        vout = grid.interp(vout, 'z')
+        if coords['z']: zout = grid.interp(zout, 'z')
     # assign coordinates
-    vout = vout.assign_coords(coords={'lon_v':ds.lon_v})
-    vout = vout.assign_coords(coords={'lat_v':ds.lat_v})
+    if coords['lon']: vout = vout.assign_coords(coords={'lon_v':lonout})
+    if coords['lat']: vout = vout.assign_coords(coords={'lat_v':latout})
     if coords['z']:vout = vout.assign_coords(coords={'z_v':zout})
     return vout
 
@@ -300,42 +336,55 @@ def x2w(ds,v, grid):
     dims = get_spatial_dims(v)
     coords = get_spatial_coords(v)
     vout = v.copy()
+    if coords['lon']: lonout = v[coords['lon']].copy()
+    if coords['lat']: latout = v[coords['lat']].copy()
     if coords['z']: zout = v[coords['z']].copy()
     if dims['x'] == 'x_u':
-        vout = grid.interp(vout, 'xi')
-        if coords['z']: zout = grid.interp(zout, 'xi')
+        vout = grid.interp(vout, 'x')
+        if coords['lon']: lonout = grid.interp(lonout, 'x')
+        if coords['lat']: latout = grid.interp(latout, 'x')
+        if coords['z']: zout = grid.interp(zout, 'x')
     if dims['y'] == 'y_v':
-        vout = grid.interp(vout, 'eta')
-        if coords['z']: zout = grid.interp(zout, 'eta')
-    if dims['s'] == 's_rho':
-        vout = grid.interp(vout, 's')
-        if coords['z']: zout = grid.interp(zout, 's')
+        vout = grid.interp(vout, 'y')
+        if coords['lon']: lonout = grid.interp(lonout, 'y')
+        if coords['lat']: latout = grid.interp(latout, 'y')
+        if coords['z']: zout = grid.interp(zout, 'y')
+    if dims['s'] == 's':
+        vout = grid.interp(vout, 'z')
+        if coords['z']: zout = grid.interp(zout, 'z')
     # assign coordinates
-    vout = vout.assign_coords(coords={'lon_rho':ds.lon_rho})
-    vout = vout.assign_coords(coords={'lat_rho':ds.lat_rho})
+    if coords['lon']: vout = vout.assign_coords(coords={'lon':lonout})
+    if coords['lat']: vout = vout.assign_coords(coords={'lat':latout})
     if coords['z']:vout = vout.assign_coords(coords={'z_w':zout})
     return vout
 
-def x2psi(ds,v, grid):
+
+def x2f(ds,v, grid):
     """ Interpolate from any grid to psi grid
     """
     dims = get_spatial_dims(v)
     coords = get_spatial_coords(v)
     vout = v.copy()
+    if coords['lon']: lonout = v[coords['lon']].copy()
+    if coords['lat']: latout = v[coords['lat']].copy()
     if coords['z']: zout = v[coords['z']].copy()
-    if dims['x'] == 'x_rho':
-        vout = grid.interp(vout, 'xi')
-        if coords['z']: zout = grid.interp(zout, 'xi')
-    if dims['y'] == 'y_rho':
-        vout = grid.interp(vout, 'eta')
-        if coords['z']: zout = grid.interp(zout, 'eta')
+    if dims['x'] == 'x':
+        vout = grid.interp(vout, 'x')
+        if coords['lon']: lonout = grid.interp(lonout, 'x')
+        if coords['lat']: latout = grid.interp(latout, 'x')
+        if coords['z']: zout = grid.interp(zout, 'x')
+    if dims['y'] == 'y':
+        vout = grid.interp(vout, 'y')
+        if coords['lon']: lonout = grid.interp(lonout, 'y')
+        if coords['lat']: latout = grid.interp(latout, 'y')
+        if coords['z']: zout = grid.interp(zout, 'y')
     if dims['s'] == 's_w':
-        vout = grid.interp(vout, 's')
-        if coords['z']: zout = grid.interp(zout, 's')
+        vout = grid.interp(vout, 'z')
+        if coords['z']: zout = grid.interp(zout, 'z')
     # assign coordinates
-    vout = vout.assign_coords(coords={'lon_psi':ds.lon_psi})
-    vout = vout.assign_coords(coords={'lat_psi':ds.lat_psi})
-    if coords['z']:vout = vout.assign_coords(coords={'z_psi':zout})
+    if coords['lon']: vout = vout.assign_coords(coords={'lon_f':lonout})
+    if coords['lat']: vout = vout.assign_coords(coords={'lat_f':latout})
+    if coords['z']:vout = vout.assign_coords(coords={'z_f':zout})
     return vout
 
 def x2x(ds,v, grid, target):
@@ -347,14 +396,13 @@ def x2x(ds,v, grid, target):
         return x2v(ds,v, grid)
     elif target == 'w':
         return x2w(ds,v, grid)
-    elif target in ['psi', 'p']:
+    elif target in ['psi', 'p', 'f']:
         return x2psi(ds,v, grid)
 
 
 
 
-
-def get_z(ds, zeta=None, h=None, xgrid=None, vgrid='r',
+def get_z(model, ds=None, z_sfc=None, h=None, xgrid=None, vgrid='r',
           hgrid='r', vtransform=2):
     ''' Compute vertical coordinates
         Spatial dimensions are placed last, in the order: s_rho/s_w, y, x
@@ -362,12 +410,12 @@ def get_z(ds, zeta=None, h=None, xgrid=None, vgrid='r',
         Parameters
         ----------
         ds: xarray dataset
-        zeta: xarray.DataArray, optional
+        z_sfc: xarray.DataArray, optional
             Sea level data, default to 0 if not provided
             If you use slices, make sure singleton dimensions are kept, i.e do:
-                zeta.isel(x_rho=[i])
+                z_sfc.isel(x=[i])
             and not :
-                zeta.isel(x_rho=i)
+                z_sfc.isel(x=i)
         h: xarray.DataArray, optional
             Water depth, searche depth in grid if not provided
         vgrid: str, optional
@@ -376,22 +424,23 @@ def get_z(ds, zeta=None, h=None, xgrid=None, vgrid='r',
             Any horizontal grid: 'r'/'rho', 'u', 'v'. Default is 'rho'
         vtransform: int, str, optional
             croco vertical transform employed in the simulation.
-            1="old": z = z0 + (1+z0/_h) * _zeta  with  z0 = hc*sc + (_h-hc)*cs
-            2="new": z = z0 * (_zeta + _h) + _zeta  with  z0 = (hc * sc + _h * cs) / (hc + _h)
+            1="old": z = z0 + (1+z0/_h) * _z_sfc  with  z0 = hc*sc + (_h-hc)*cs
+            2="new": z = z0 * (_z_sfc + _h) + _z_sfc  with  z0 = (hc * sc + _h * cs) / (hc + _h)
     '''
 
-    xgrid = ds.attrs['xgcm-Grid'] if xgrid is None else xgrid
+    xgrid = model.xgrid if xgrid is None else xgrid
+    ds = model.ds if ds is None else ds
 
     h = ds.h if h is None else h
-    zeta = 0*ds.h if zeta is None else zeta
+    z_sfc = 0*ds.h if z_sfc is None else z_sfc
 
     # switch horizontal grid if needed
     if hgrid in ['u','v']:
         h = x2x(ds, h, xgrid, hgrid)
-        zeta = x2x(ds, zeta, xgrid, hgrid)
+        z_sfc = x2x(ds, z_sfc, xgrid, hgrid)
 
-    # align datasets (zeta may contain a slice along one dimension for example)
-    h, zeta  = xr.align(h, zeta, join='inner')
+    # align datasets (z_sfc may contain a slice along one dimension for example)
+    h, z_sfc  = xr.align(h, z_sfc, join='inner')
 
     if vgrid in ['r', 'rho']:
         vgrid = 'rho'
@@ -405,10 +454,10 @@ def get_z(ds, zeta=None, h=None, xgrid=None, vgrid='r',
 
     if vtransform == 1:
         z0 = hc*sc + (h-hc)*cs
-        z = z0 + (1+z0/h) * zeta
+        z = z0 + (1+z0/h) * z_sfc
     elif vtransform == 2:
         z0 = (hc * sc + h * cs) / (hc + h)
-        z = z0 * (zeta + h) + zeta
+        z = z0 * (z_sfc + h) + z_sfc
 
     # reorder spatial dimensions and place them last
     sdims = list(get_spatial_dims(z).values())
@@ -416,92 +465,57 @@ def get_z(ds, zeta=None, h=None, xgrid=None, vgrid='r',
     reordered_dims = tuple(d for d in z.dims if d not in sdims) + sdims
     z = z.transpose(*reordered_dims, transpose_coords=True)
 
-    return z.rename('z_'+vgrid)
+    return z.fillna(0.).rename('z_'+vgrid)
 
 
 
-def rotuv(ds, u=None, v=None, angle=None):
+def rotuv(model, ds=None, xgrid=None, u=None, v=None, angle=None):
     '''
     Rotate winds or u,v to lat,lon coord -> result on rho grid by default
     '''
 
     import timeit
     
-    xgrid = ds.attrs['xgcm-Grid']
+    xgrid = model.xgrid if xgrid is None else xgrid
+    ds = model.ds if ds is None else ds
         
-    if u is None:
-        u = ds.u 
-        u = x2x(ds, u, xgrid, 'r')
-        #u = ds_hor_chunk(u, wanted_chunk=100)
+    u = ds.u if u is None else u
+    hgrid = get_grid_point(u)
+    if hgrid != 'r': u = x2rho(ds, u, xgrid)
+    #u = ds_hor_chunk(u, wanted_chunk=100)
         
-    if v is None:
-        v = ds.v
-        v = x2x(ds, v, xgrid, 'r')
-        #v = ds_hor_chunk(v, wanted_chunk=100)
+    v = ds.v if v is None else v
+    hgrid = get_grid_point(v)
+    if hgrid != 'r': v = x2rho(ds, v, xgrid)
+    #v = ds_hor_chunk(v, wanted_chunk=100)
         
     angle = ds.angle if angle is None else angle
+    hgrid = get_grid_point(angle)
+    if hgrid != 'r': angle = x2rho(ds, angle, xgrid)
     
     cosang = np.cos(angle)
     sinang = np.sin(angle)
 
     # All the program statements
     urot = (u*cosang - v*sinang)
-    #urot = da.multiply(u, cosang) - da.multiply(v, sinang)
     
     #start = timeit.default_timer()
     vrot = (u*sinang + v*cosang)
-    #vrot = da.multiply(u, sinang) + da.multiply(v, cosang)
     #stop = timeit.default_timer()
     #print("time vrot: "+str(stop - start))
-     
+    
+    # assign coordinates to urot/vrot
+    dims = get_spatial_dims(u)
     coords = get_spatial_coords(u)
-    if coords['z'] is not None: urot = urot.assign_coords(coords={'z_r':u[coords['z']]})
+    for k,c in coords.items(): 
+        if c is not None: urot = urot.assign_coords(coords={c:u[c]})
+    dims = get_spatial_dims(v)
     coords = get_spatial_coords(v)
-    if coords['z'] is not None: vrot = vrot.assign_coords(coords={'z_r':v[coords['z']]}) 
+    for k,c in coords.items(): 
+        if c is not None: vrot = vrot.assign_coords(coords={c:v[c]})
 
     return [urot,vrot]
 
-
-def find_nearest_above(my_array, target, axis=0):
-    diff = target - my_array
-    diff = diff.where(diff>0,np.inf)
-    return xr.DataArray(diff.argmin(axis=axis))
-
-
-def findLatLonIndex(ds, lonValue, latValue):
-    ''' Find nearest  grid point of  click value '''
-    a = abs(ds['xi_rho'] - lonValue) + \
-        abs(ds['eta_rho'] - latValue)
-    return np.unravel_index(a.argmin(), a.shape)
-
-def findLonIndex(ds, lonValue):
-    ''' Find nearest  grid point of  click value '''
-    a = abs(ds['xi_rho'] - lonValue)
-    return np.unravel_index(a.argmin(), a.shape)
-
-def findLatLonIndex2(ds, lonValue, latValue):
-    ''' Find nearest  grid point of  click value '''
-    a = abs(ds['x_rho'] - lonValue) + \
-        abs(ds['y_rho'] - latValue)
-    return np.unravel_index(a.argmin(), a.shape)
-
-def findDepthIndex(z, depth):
-        ''' Find nearest  grid point'''
-        a = abs(z - depth)
-        return xr.DataArray(a.argmin(dim='s_rho'))
-    
-def find_nearest(array, value):
-
-    """
-    Find item in array which is the closest to 
-    a given values.
-    """
-
-    array = np.asarray(array)
-
-    idx = (np.abs(array - value)).argmin()
-
-    return idx
     
 def get_grid_point(var):
     dims = var.dims
@@ -509,16 +523,16 @@ def get_grid_point(var):
         if "y_rho" in dims:
             return 'u'
         else:
-            return 'psi'
+            return 'f'
     elif "y_v" in dims:
         return 'v'
     else:
         if 's_rho' in dims:
-            return 'rho'
+            return 'r'
         else:
             return 'w'
         
-def slices(ds, var, z, longitude=None, latitude=None, depth=None):
+def slices(model, var, z, ds=None, xgrid=None, longitude=None, latitude=None, depth=None):
     """
     #
     #
@@ -542,8 +556,10 @@ def slices(ds, var, z, longitude=None, latitude=None, depth=None):
     #
     """
     from matplotlib.cbook import flatten
-
-    xgrid = ds.attrs['xgcm-Grid']
+  
+    xgrid = model.xgrid if xgrid is None else xgrid
+    ds = model.ds if ds is None else ds
+    
     if longitude is None and latitude is None and depth is None:
         "Longitude or latitude or depth must be defined"
         return None
@@ -561,35 +577,36 @@ def slices(ds, var, z, longitude=None, latitude=None, depth=None):
      # Find dimensions and coordinates of the variable
     dims = get_spatial_dims(var)
     coords = get_spatial_coords(var)
+    if dims['s'] is not None and coords['z'] is None: 
+        var = var.assign_coords(coords={'z':z})
+        coords = get_spatial_coords(var)
     hgrid = get_grid_point(var)
 
     if longitude is not None:
-        axe = 'xi'
-        coord_ref = coords['x'] if coords['x'] else coords['lon']
-        coord_x = coords['y'] if coords['y'] else coords['lat']
-        if dims['s'] is not None:
-            coord_y = coords['z'] if coords['z'] is not None else 'z_'+hgrid[0]
+        axe = 'x'
+        coord_ref = coords['lon']
+        coord_x = coords['lat']
+        coord_y = coords['z']
         slices_values = longitude
     elif latitude is not None:
-        axe = 'eta'
-        coord_ref = coords['y'] if coords['y'] else coords['lat']
-        coord_x = coords['x'] if coords['x'] else coords['lon']
-        if dims['s'] is not None:
-            coord_y = coords['z'] if coords['z'] is not None else 'z_'+hgrid[0]
+        axe = 'y'
+        coord_ref = coords['lat']
+        coord_x = coords['lon']
+        coord_y = coords['z']
         slices_values = latitude
     else:
-        axe = 's'
+        axe = 'z'
         coord_ref = coords['z']
-        coord_x = coords['x'] if coords['x'] else coords['lon']
-        coord_y = coords['y'] if coords['y'] else coords['lat']
+        coord_x = coords['lon']
+        coord_y = coords['lat']
         slices_values = depth
 
     # Recursively loop over time if needed
     if len(var.squeeze().dims) == 4:
-        vnew = [slices(ds, var.isel(time_counter=t), z.isel(time_counter=t),
+        vnew = [slices(ds, var.isel(t=t), z.isel(t=t),
                       longitude=longitude, latitude=latitude, depth=depth)
-                      for t in range(len(var.time_counter))]
-        vnew = xr.concat(vnew, dim='time_counter')
+                      for t in range(len(var.t))]
+        vnew = xr.concat(vnew, dim='t')
     else:
         vnew = xgrid.transform(var, axe, slices_values,
                                target_data=var[coord_ref]).squeeze()
@@ -611,7 +628,9 @@ def slices(ds, var, z, longitude=None, latitude=None, depth=None):
         vnew = vnew.assign_coords(coords={coord_x:var[coord_x]})
         vnew = vnew.assign_coords(coords={coord_y:var[coord_y]})
 
-    return vnew.squeeze().fillna(0.)  #unify_chunks()
+#     return vnew.squeeze().unify_chunks().fillna(0.)  #unify_chunks() 
+    return vnew.squeeze().fillna(0.)  #unify_chunks()   
+
 
 
 
@@ -634,58 +653,77 @@ def haversine(lon1, lat1, lon2, lat2):
     
 # ----------------------------- grid rechunk -----------------------------
 
-def ds_hor_chunk(ds, keep_complete_axe=None, wanted_chunk=100):
+def auto_chunk(ds, keep_complete_dim=None, wanted_chunk=150):
     """
     Rechunk Dataset or DataArray such as each partition size is about 100Mb
     Input:
         - ds : (Dataset or DataArray) object to rechunk
-        - keep_complete_axe : (character) Horizontal axe to keep with no chunk (x or y)
+        - keep_complete_dim : (character) Horizontal axe to keep with no chunk ('x','y','s')
         - wanted_chunk : (integer) size of each partition in Mb
     Output:
         - object rechunked
     """
-    
+
     #check input parameters
     if not isinstance(ds, (xr.Dataset,xr.DataArray)):
         print('argument must be a xarray.DataArray or xarray.Dataset')
         return
-    if keep_complete_axe and keep_complete_axe!= 'x' and keep_complete_axe!='y':
-        print('keep_complete_axe must equal x or y')
+    if keep_complete_dim and keep_complete_dim != 'x' \
+                         and keep_complete_dim != 'y' \
+                         and keep_complete_dim != 's':
+        print('keep_complete_dim must equal x or y or s')
         return
+
+    # get horizontal dimensions names of the Dataset/DataArray
+    dname = get_spatial_dims(ds)
+    chunks_name = dname.copy()
     
-    # get horizontal dimensions of the Dataset/DataArray
-    chunks = {}
-    hor_dim_names = {}
-    if isinstance(ds,xr.Dataset):
-        s_dim = max([ds.dims[s] for s in ds.dims.keys() if 's_' in s])
-        for key,value in ds.dims.items():
-            if 'x' in key or 'y' in key:
-                hor_dim_names[key] = value
-    else:
-        s_dim = max([len(ds[s]) for s in ds.dims if 's_' in s])
-        for key in ds.dims:
-            if 'x' in key or 'y' in key:
-                hor_dim_names[key] = len(ds[key])
-                           
-    if keep_complete_axe:
-        # get the maximum length of the dimensions along the argument axe
-        # set the chunks of those dimensions to -1 (no chunk)
-        h_dim=[]
-        for s in hor_dim_names.keys():
-            if keep_complete_axe in s:
-                h_dim.append(hor_dim_names[s])
-                hor_dim_names[s] = -1
-        h_dim = max(h_dim) 
-        # compute the chunk on the dimensions along the other horizontal axe
-        size_chunk = int(np.ceil(wanted_chunk*1.e6 / 4. / s_dim / h_dim))
-    else : 
-        # compute the chunk on all horizontal dimensions
-        size_chunk = int(np.ceil(np.sqrt(wanted_chunk*1.e6 / 4. / s_dim )))
-    
-    # Initialize the dctionnary of chunks
-    for s in hor_dim_names.keys():
-        chunks[s]=min([size_chunk,hor_dim_names[s]])
+    # get horizontal dimensions sizes of the Dataset/DataArray
+    chunks_size={}
+    for k,v in chunks_name.items():
+        chunks_size[k] = ds.sizes[v]
+
+    # always chunk in time
+    if 't' in ds.dims: chunks_size['t'] = 1
         
-    return ds.chunk(chunks)
+    if keep_complete_dim:
+        # remove keep_complete_dim from the dimensions of the Dataset/DatAarray
+        del chunks_name[keep_complete_dim]
+        
+        # reduce chunks size  beginning by 's' then 'y' then 'x' if necessary
+        for k in chunks_name.keys():
+            for d in range(chunks_size[k],0,-1):
+                chunk_size = (chunks_size['x']*chunks_size['y']*chunks_size['s']*4 / 1.e6)        
+                if chunk_size > wanted_chunk:
+                    chunks_size[k] = d
+                else:
+                    break
+            if chunk_size > wanted_chunk:
+                break
+    else : 
+        
+        # reduce chunks size  beginning by 's' then 'y' then 'x' if necessary
+        for k in chunks_name.keys():
+            for d in range(chunks_size[k],0,-1):
+                chunk_size = (chunks_size['x']*chunks_size['y']*chunks_size['s']*4 / 1.e6)        
+                if chunk_size > wanted_chunk:
+                    chunks_size[k] = d
+                else:
+                    break
+            if chunk_size > wanted_chunk:
+                break
+            
+    if isinstance(ds,xr.Dataset):
+        # set chunk for all the dimensions of the dataset (ie : x and x_u)
+        for c in list(itertools.product(dname.keys(), ds.dims.keys())):
+            if c[1].startswith(c[0]):
+                chunks_size[c[1]] = chunks_size[c[0]]
+    else:
+        # rename the dimension name by the right values (ie: x_u instead of x)
+        for key in dname.keys():
+            chunks_size[dname[key]] = chunks_size.pop(key)
+
+        
+    return ds.chunk(chunks_size)
 
 
